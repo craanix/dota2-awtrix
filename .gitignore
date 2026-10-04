@@ -3,6 +3,9 @@ bridge.log
 rotation.json
 gsi_sample.json
 
+# local overrides
+config.local.json
+
 # python
 __pycache__/
 *.py[cod]

@@ -1,5 +1,5 @@
-"""
-Dota 2 → AWTRIX-NG bridge
+﻿"""
+Dota 2 -> AWTRIX-NG bridge
 
 Слушает GSI (Game State Integration) от Dota 2 на порту 42069 и мониторит
 console.log на предмет найденного матча.
@@ -24,17 +24,35 @@ import threading
 import time
 from collections import deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
 import requests
 
+
+# ── Пользовательские настройки (config.json) ───────────────────────
+_HERE = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(_HERE, "config.json")
+
+
+def load_config() -> dict:
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+CFG = load_config()
+
+
 # ── Настройки ──────────────────────────────────────────────────────
-AWTRIX_IP = "192.168.31.41"
-AWTRIX_BASE = f"http://{AWTRIX_IP}/api/v1"
+# Адрес матрицы. Приоритет: переменная окружения AWTRIX_IP, потом config.json,
+# потом mDNS-имя по умолчанию (актуальное имя видно в веб-интерфейсе AWTRIX,
+# обычно вида awtrixng-XXXXXX.local).
+AWTRIX_HOST = os.environ.get("AWTRIX_IP") or CFG.get("awtrix_ip") or "awtrixng.local"
+AWTRIX_BASE = f"http://{AWTRIX_HOST}/api/v1"
 
-DOTA_GSI_PORT = 42069
-
-# Путь к console.log Dota 2 (нужен -console -condebug в параметрах запуска)
-DOTA_LOG_PATH = r"F:\SteamLibrary\steamapps\common\dota 2 beta\game\dota\console.log"
+DOTA_GSI_PORT = int(os.environ.get("DOTA_GSI_PORT")
+                    or CFG.get("gsi_port") or 42069)
 
 # Сигнал "матч найден, надо принять"
 MATCH_ACCEPT_PATTERNS = [
@@ -58,12 +76,81 @@ APP_DURATION_MS = 5000
 # Как часто обновлять экраны (сек)
 APP_PUSH_INTERVAL = 1.0
 
-LOG_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge.log")
+LOG_OUT = os.path.join(_HERE, "bridge.log")
 # Сохранённая ротация пользователя — на диск, чтобы переживать перезапуск скрипта
-ROTATION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rotation.json")
+ROTATION_FILE = os.path.join(_HERE, "rotation.json")
 
-# Если во время игры GSI молчит дольше этого, считаем матч законченным
+# Если во время игры GSI молчит дольше этого, считаем матч конченным
 GSI_STALE_SEC = 20
+
+# ── Поиск установки Dota 2 ─────────────────────────────────────────
+# Куда смотреть, если не задано переменной окружения DOTA_DIR
+STEAM_ROOTS = [
+    r"C:\Program Files (x86)\Steam",
+    r"C:\Program Files\Steam",
+    os.path.expanduser("~/.steam/steam"),
+    os.path.expanduser("~/.local/share/Steam"),
+    os.path.expanduser("~/.steam/root"),
+]
+# Относительный путь от корня библиотеки Steam до папки с данными Dota
+DOTA_SUBDIR = os.path.join("steamapps", "common", "dota 2 beta", "game", "dota")
+
+
+def steam_library_paths():
+    """Все библиотеки Steam: корень + всё, что перечислено в libraryfolders.vdf."""
+    roots = []
+    env = os.environ.get("STEAM_DIR")
+    if env:
+        roots.append(env)
+    roots.extend(STEAM_ROOTS)
+
+    libs = []
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        if root not in libs:
+            libs.append(root)
+        # в libraryfolders.vdf лежат дополнительные библиотеки
+        vdf = os.path.join(root, "steamapps", "libraryfolders.vdf")
+        try:
+            with open(vdf, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for m in re.finditer(r'"path"\s+"([^"]+)"', text):
+            p = m.group(1).replace("\\\\", "\\")
+            if os.path.isdir(p) and p not in libs:
+                libs.append(p)
+    return libs
+
+
+def find_dota_log() -> str | None:
+    """Ищем console.log Dota 2. Нужен -console -condebug, иначе файла нет."""
+    env = os.environ.get("DOTA_LOG_PATH") or CFG.get("dota_log_path")
+    if env:
+        return env
+
+    env_dir = os.environ.get("DOTA_DIR") or CFG.get("dota_dir")
+    if env_dir:
+        return os.path.join(env_dir, "console.log")
+
+    for lib in steam_library_paths():
+        cand = os.path.join(lib, DOTA_SUBDIR, "console.log")
+        if os.path.isfile(cand):
+            return cand
+        # console.log появляется только при запущенной Dota с -console,
+        # поэтому проверяем и сам каталог — он должен существовать всегда
+        dota_dir = os.path.join(lib, DOTA_SUBDIR)
+        if os.path.isdir(dota_dir):
+            return cand
+    return None
+
+
+def resolve_dota_log():
+    """Актуальный путь к логу: перечитываем, файл мог появиться позже."""
+    global DOTA_LOG_PATH
+    DOTA_LOG_PATH = find_dota_log()
+    return DOTA_LOG_PATH
 
 # Состояния, в которых игра идёт
 PLAYING_STATES = (
@@ -115,14 +202,21 @@ _log_lock = threading.Lock()
 
 
 def log(msg: str):
-    line = f"{time.strftime('%H:%M:%S')} {msg}"
+    # Пишем только ASCII-совместимый текст: консоль Windows в cp1251/cp866
+    # не умеет кодировать символы вроде "->", и print() падал с UnicodeEncodeError,
+    # а исключение из логгера убивало поток. Поэтому ASCII-замена и глотаем ошибку.
+    safe = str(msg).encode("ascii", "replace").decode("ascii")
+    line = f"{time.strftime('%H:%M:%S')} {safe}"
     with _log_lock:
         try:
             with open(LOG_OUT, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
         except Exception:
             pass
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
 
 
 # ── AWTRIX helpers ─────────────────────────────────────────────────
@@ -142,7 +236,7 @@ def awtrix_notify(text: str, background: str = "", text_color: str = "",
         payload["sound"] = sound
     try:
         r = requests.post(f"{AWTRIX_BASE}/notifications", json=payload, timeout=3)
-        log(f"notify '{text}' → {r.status_code} {r.text[:80]}")
+        log(f"notify '{text}' -> {r.status_code} {r.text[:80]}")
     except Exception as e:
         log(f"notify error: {e}")
 
@@ -153,7 +247,7 @@ def awtrix_app(name: str, payload: dict):
     try:
         r = requests.put(f"{AWTRIX_BASE}/apps/pushed/{name}", json=payload, timeout=3)
         if r.status_code != 200:
-            log(f"app/{name} → {r.status_code} {r.text[:120]}")
+            log(f"app/{name} -> {r.status_code} {r.text[:120]}")
     except Exception as e:
         log(f"app/{name} error: {e}")
 
@@ -201,7 +295,7 @@ def set_rotation(order=None, disabled=None):
     body["disabled"] = disabled or []  # disabled всегда обязателен
     try:
         r = requests.put(f"{AWTRIX_BASE}/apps/order", json=body, timeout=4)
-        log(f"rotation set order={order} disabled={len(disabled or [])} → {r.status_code}")
+        log(f"rotation set order={order} disabled={len(disabled or [])} -> {r.status_code}")
     except Exception as e:
         log(f"rotation error: {e}")
 
@@ -541,14 +635,25 @@ def monitor_console():
     ino = None
 
     def wlog(msg):
-        line = f"{time.strftime('%H:%M:%S')} {msg}"
-        print(line, flush=True)
-        fh.write(line + "\n")
+        # ASCII-only, см. комментарий у log()
+        safe = str(msg).encode("ascii", "replace").decode("ascii")
+        line = f"{time.strftime('%H:%M:%S')} {safe}"
+        try:
+            print(line, flush=True)
+        except Exception:
+            pass
+        try:
+            fh.write(line + "\n")
+        except Exception:
+            pass
 
-    wlog(f"monitor start, log={DOTA_LOG_PATH}")
+    wlog(f"monitor start, log={resolve_dota_log() or 'NOT FOUND (is -console -condebug set?)'}")
 
     while True:
         if f is None:
+            # путь мог не определиться при старте — переспрашиваем
+            if not DOTA_LOG_PATH:
+                resolve_dota_log()
             try:
                 st = os.stat(DOTA_LOG_PATH)
                 f = open(DOTA_LOG_PATH, "rb")
@@ -613,23 +718,57 @@ def monitor_console():
 
 
 # ── Main ───────────────────────────────────────────────────────────
+class SingleInstanceServer(HTTPServer):
+    """Не даём подняться второму экземпляру.
+
+    HTTPServer по умолчанию разрешает повторно занять занятый порт
+    (allow_reuse_address = 1). Из-за этого можно было запустить два моста:
+    оба слушали 42069 и оба переписывали ротацию AWTRIX.
+    """
+
+    allow_reuse_address = False
+    allow_reuse_port = False
+
+
 def main():
     log("=" * 50)
     log("  Dota 2 -> AWTRIX-NG Bridge")
-    log(f"  AWTRIX: {AWTRIX_IP}")
+    log(f"  AWTRIX: {AWTRIX_HOST}")
     log(f"  GSI port: {DOTA_GSI_PORT}")
     log("=" * 50)
+
+    # Проверяем связь сразу — иначе ошибки выше будут неочевидны
+    try:
+        r = requests.get(f"{AWTRIX_BASE}/capabilities", timeout=4)
+        log(f"[AWTRIX] reachable, API v1 ok ({r.status_code})")
+    except Exception as e:
+        log(f"[AWTRIX] NOT reachable as '{AWTRIX_HOST}': {e}")
+        log("         укажи адрес в config.json (ключ awtrix_ip) "
+            "или в переменной окружения AWTRIX_IP")
+
+    log(f"[DOTA] console.log: {resolve_dota_log() or 'NOT FOUND'}")
+    if not resolve_dota_log():
+        log("         Dota не найдена. Проверь -console -condebug в "
+            "параметрах запуска и путь в config.json (ключ dota_dir)")
+
+    try:
+        server = SingleInstanceServer(("0.0.0.0", DOTA_GSI_PORT), GSIHandler)
+    except OSError as e:
+        log(f"[GSI] port {DOTA_GSI_PORT} занят ({e}).")
+        log("       Скорее всего скрипт уже запущен — это нормально, "
+            "второй экземпляр не нужен.")
+        log("       Если считаешь что нет — закрой старый процесс.")
+        return
 
     threading.Thread(target=monitor_console, daemon=True).start()
     threading.Thread(target=screens_loop, daemon=True).start()
 
-    server = HTTPServer(("0.0.0.0", DOTA_GSI_PORT), GSIHandler)
     log(f"[GSI] Listening on 0.0.0.0:{DOTA_GSI_PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         log("shutting down")
-        for n in ("dota_stat", "dota_farm", "dota_base", "dota_dead"):
+        for n in DOTA_APPS:
             awtrix_delete_app(n)
         server.shutdown()
 
