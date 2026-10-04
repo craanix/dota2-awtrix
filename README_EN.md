@@ -130,9 +130,11 @@ games. The script therefore inspects a sliding window of the last 120 log lines:
 if `PracticeLobby`, `CustomGame` or `Practice` appears nearby, the trigger is
 ignored.
 
-That also means the limitation: if you are in a party lobby and someone readies
-up, you will get a notification. There is no way to tell that apart from real
-matchmaking by log content.
+In a party lobby, where someone hits ready, you will get a notification too, and
+that cannot be told apart from real matchmaking by log content. This is a
+deliberate trade-off: better to notify once too often than miss a real match. If
+the noise bothers you, lower `NOTIFY_COOLDOWN` or add your own markers to
+`IGNORE_IF_RECENT`.
 
 ## Configuration
 
