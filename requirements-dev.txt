@@ -1,0 +1,2 @@
+# Only needed for make_screenshots.py, not for the bridge itself
+Pillow>=9.0

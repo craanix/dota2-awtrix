@@ -25,6 +25,28 @@ switched off and comes back after the match:
 
 On match end you get `GG K/D/A`.
 
+## How it looks
+
+| Match notification | KDA | Farm |
+|---|---|---|
+| ![Accept](docs/screens/accept.png) | ![KDA](docs/screens/kda.png) | ![Farm](docs/screens/farm.png) |
+
+| Base | Death timer |
+|---|---|
+| ![Base](docs/screens/base.png) | ![Death timer](docs/screens/death-timer.png) |
+
+The bars on the base screen are radiant on top, dire at the bottom. Under them you
+get either building HP percentages (`54% 26%`) or the kill score (`53:23`) when the
+`building` block has not arrived from GSI yet — the number format tells you which.
+
+The matrix does the drawing: `make_screenshots.py` sends the payload, reads the
+framebuffer and assembles a PNG, so the images contain real pixels rather than a
+reconstructed font.
+
+> "Принять" appears in caps on the panel even though it is sent with the correct
+> case: AWTRIX's built-in font has no lowercase glyphs and substitutes uppercase
+> ones. That is a font limitation, not a setting.
+
 ## Requirements
 
 - An AWTRIX-NG matrix, firmware ≥ 1.0, HTTP API v1 enabled — see
@@ -191,6 +213,16 @@ python list_apps.py
 # what is actually drawn, as a pixel map
 python show_screens.py
 ```
+
+Screenshots for the docs (needs Pillow from `requirements-dev.txt`):
+
+```bash
+python make_screenshots.py [matrix_address]
+```
+
+It pushes a set of plausible values for each screen to the matrix, captures the
+framebuffer and writes PNGs into `docs/screens/`. It deletes the temporary apps
+afterwards, so your working rotation is left alone.
 
 `bridge.log` records everything: rotation switches, detected matches, rejected
 false positives, errors. Lines worth looking for:
