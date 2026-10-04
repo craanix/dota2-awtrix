@@ -1,0 +1,11 @@
+# runtime
+bridge.log
+rotation.json
+gsi_sample.json
+list_apps.py
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
